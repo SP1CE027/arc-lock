@@ -10,8 +10,9 @@ EMBEDDING_FILE = Path('data/yash_embeddings.npy')
 
 MATCH_THRESHOLD = 0.38
 VERIFY_INTERVAL = 0.5
-LOCK_TIMEOUT = 15.0      # Use 15s for testing, change back to 7.0 later
-ENABLE_LOCK = True       # Set to False if you want dry-run mode
+DETECTION_INTERVAL = 3.0
+LOCK_TIMEOUT = 7.0
+ENABLE_LOCK = True
 
 # Temporal voting
 HISTORY_SIZE = 5
@@ -19,105 +20,164 @@ REQUIRED_MATCHES = 3
 
 history = deque(maxlen=HISTORY_SIZE)
 
-# Initialize ArcFace
-app = FaceAnalysis(name='buffalo_l')
-app.prepare(ctx_id=0, det_size=(640, 640))
+# Load embeddings once
+if EMBEDDING_FILE.exists():
+    SAVED_EMBEDDINGS = np.load(EMBEDDING_FILE).astype(np.float32)
+    SAVED_NORMS = np.linalg.norm(SAVED_EMBEDDINGS, axis=1)
+else:
+    SAVED_EMBEDDINGS = None
+    SAVED_NORMS = None
 
-# Open webcam
+# Initialize ArcFace (detection + recognition only)
+app = FaceAnalysis(
+    name='buffalo_l',
+    allowed_modules=['detection', 'recognition']
+)
+app.prepare(ctx_id=0, det_size=(320, 320))
+
+# Webcam
 cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
 if not cap.isOpened():
     print('Could not open webcam')
     exit()
 
-print('Press E to enroll (20 samples)')
 print('Press P to pause/resume')
 print('Press Q to quit')
 
-status_text = 'Ready'
+status_text = 'Starting'
 status_color = (0, 255, 0)
 
+last_detection = 0.0
 last_verify = 0.0
 last_verified = time.monotonic()
 
 paused = False
 locked_once = False
 
+# Tracking
+tracker = None
+tracking = False
+track_box = None
 
-def cosine_distance(a, b):
-    a = a / np.linalg.norm(a)
-    b = b / np.linalg.norm(b)
-    return 1 - np.dot(a, b)
-
+# Cached recognition
+last_embedding = None
 
 while True:
 
     ret, frame = cap.read()
 
-    # Camera recovery
     if not ret:
-        print('Camera lost, attempting recovery...')
-        cap.release()
-        time.sleep(1)
-        cap = cv2.VideoCapture(0)
+        time.sleep(0.1)
         continue
-
-    faces = app.get(frame)
-
-    # Draw face boxes
-    for face in faces:
-        x1, y1, x2, y2 = face.bbox.astype(int)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
     now = time.monotonic()
 
-    # ---------------- AUTO VERIFY ----------------
-    if not paused and now - last_verify >= VERIFY_INTERVAL:
+    # -------- FULL RETINAFACE DETECTION (rare) --------
+    if (not tracking) or (now - last_detection >= DETECTION_INTERVAL):
+
+        last_detection = now
+
+        faces = app.get(frame)
+
+        if len(faces) == 1:
+
+            face = faces[0]
+
+            x1, y1, x2, y2 = face.bbox.astype(int)
+
+            track_box = (x1, y1, x2 - x1, y2 - y1)
+
+            # Cache embedding from this detection
+            last_embedding = face.embedding.astype(np.float32)
+
+            # Start tracker
+            if hasattr(cv2, 'TrackerKCF_create'):
+                tracker = cv2.TrackerKCF_create()
+            else:
+                tracker = cv2.legacy.TrackerKCF_create()
+
+            tracker.init(frame, track_box)
+
+            tracking = True
+
+        else:
+
+            tracking = False
+            track_box = None
+            last_embedding = None
+
+    # -------- TRACK BETWEEN DETECTIONS --------
+    elif tracking:
+
+        ok, box = tracker.update(frame)
+
+        if ok:
+
+            x, y, w, h = map(int, box)
+            track_box = (x, y, w, h)
+
+        else:
+
+            tracking = False
+            track_box = None
+            last_embedding = None
+
+    # -------- VERIFY USING CACHED EMBEDDING --------
+    if (
+        not paused
+        and tracking
+        and last_embedding is not None
+        and SAVED_EMBEDDINGS is not None
+        and now - last_verify >= VERIFY_INTERVAL
+    ):
 
         last_verify = now
 
-        if EMBEDDING_FILE.exists() and len(faces) == 1:
+        current = last_embedding
+        current_norm = np.linalg.norm(current)
 
-            saved = np.load(EMBEDDING_FILE)
-            current = faces[0].embedding
+        dots = SAVED_EMBEDDINGS @ current
+        dists = 1 - dots / (SAVED_NORMS * current_norm)
 
-            dists = [cosine_distance(e, current) for e in saved]
+        best = float(np.min(dists))
 
-            best = min(dists)
-            avg_top5 = np.mean(sorted(dists)[:5])
+        is_match = best < MATCH_THRESHOLD
 
-            is_match = best < MATCH_THRESHOLD
+        history.append(is_match)
 
-            history.append(is_match)
+        verified_count = sum(history)
 
-            verified_count = sum(history)
+        if verified_count >= REQUIRED_MATCHES:
 
-            if verified_count >= REQUIRED_MATCHES:
-                last_verified = now
-                locked_once = False
-                status_text = f'VERIFIED {best:.3f}'
-                status_color = (0, 255, 0)
+            last_verified = now
+            locked_once = False
 
-            elif verified_count >= 1:
-                status_text = f'UNCERTAIN {best:.3f}'
-                status_color = (0, 255, 255)
+            status_text = f'VERIFIED {best:.3f}'
+            status_color = (0, 255, 0)
 
-            else:
-                status_text = f'NOT VERIFIED {best:.3f}'
-                status_color = (0, 0, 255)
+        elif verified_count >= 1:
 
-            print(
-                f'{status_text} | '
-                f'Votes: {verified_count}/{HISTORY_SIZE} | '
-                f'AvgTop5: {avg_top5:.3f}'
-            )
+            status_text = f'UNCERTAIN {best:.3f}'
+            status_color = (0, 255, 255)
 
         else:
-            history.append(False)
-            status_text = 'NO FACE'
+
+            status_text = f'NOT VERIFIED {best:.3f}'
             status_color = (0, 0, 255)
 
-    # ---------------- ABSENCE TIMER ----------------
+    # -------- NO FACE --------
+    if not tracking:
+
+        history.append(False)
+
+        status_text = 'NO FACE'
+        status_color = (0, 0, 255)
+
+    # -------- LOCK TIMER --------
     elapsed = now - last_verified
     remaining = max(0.0, LOCK_TIMEOUT - elapsed)
 
@@ -146,129 +206,61 @@ while True:
         else:
             lock_color = (0, 255, 255)
 
-    # ---------------- DRAW UI ----------------
-    cv2.putText(
-        frame,
-        status_text,
-        (20, 40),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1,
-        status_color,
-        2
-    )
+    # -------- DRAW UI --------
+    if track_box is not None:
 
-    cv2.putText(
-        frame,
-        lock_text,
-        (20, 80),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.8,
-        lock_color,
-        2
-    )
+        x, y, w, h = track_box
 
-    cv2.putText(
-        frame,
-        f'Votes: {sum(history)}/{HISTORY_SIZE}',
-        (20, 120),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (255, 255, 255),
-        2
-    )
+        cv2.rectangle(
+            frame,
+            (x, y),
+            (x + w, y + h),
+            (0, 255, 0),
+            2
+        )
 
-    cv2.putText(
-        frame,
-        'P: Pause  E: Enroll  Q: Quit',
-        (20, frame.shape[0] - 20),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        (200, 200, 200),
-        1
-    )
+    cv2.putText(frame, status_text, (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
 
-    cv2.imshow('ArcFace V1.5', frame)
+    cv2.putText(frame, lock_text, (20, 80),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, lock_color, 2)
+
+    cv2.putText(frame, f'Votes: {sum(history)}/{HISTORY_SIZE}',
+                (20, 120),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+    cv2.putText(frame, 'P: Pause  Q: Quit',
+                (20, frame.shape[0] - 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+
+    cv2.imshow('ArcFace V1.8', frame)
 
     key = cv2.waitKey(1) & 0xFF
 
-    # ---------------- ENROLL ----------------
-    if key == ord('e'):
-
-        embeddings = []
-
-        print('Capturing 20 samples...')
-        status_text = 'Capturing samples...'
-        status_color = (0, 255, 255)
-
-        while len(embeddings) < 20:
-
-            ret, frame = cap.read()
-
-            if not ret:
-                continue
-
-            faces = app.get(frame)
-
-            if len(faces) == 1:
-
-                face = faces[0]
-
-                x1, y1, x2, y2 = face.bbox.astype(int)
-                face_area = (x2 - x1) * (y2 - y1)
-
-                if face_area > 12000:
-
-                    embeddings.append(face.embedding)
-
-                    print(f'Sample {len(embeddings)}/20')
-
-                    status_text = f'Sample {len(embeddings)}/20'
-
-            preview = frame.copy()
-
-            cv2.putText(
-                preview,
-                status_text,
-                (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 255, 255),
-                2
-            )
-
-            cv2.imshow('ArcFace V1.5', preview)
-
-            cv2.waitKey(50)
-
-        np.save(EMBEDDING_FILE, np.array(embeddings))
-
-        history.clear()
-        last_verified = time.monotonic()
-        locked_once = False
-
-        status_text = 'Enrollment complete'
-        status_color = (0, 255, 0)
-
-        print('Enrollment complete')
-
-    # ---------------- PAUSE ----------------
-    elif key == ord('p'):
+    # -------- PAUSE --------
+    if key == ord('p'):
 
         paused = not paused
 
         if paused:
+
             status_text = 'PAUSED'
             status_color = (255, 255, 0)
+
             print('Monitoring paused')
+
         else:
+
             history.clear()
             last_verified = time.monotonic()
             locked_once = False
+
             status_text = 'RESUMED'
             status_color = (0, 255, 0)
+
             print('Monitoring resumed')
 
-    # ---------------- QUIT ----------------
+    # -------- QUIT --------
     elif key == ord('q'):
         break
 
