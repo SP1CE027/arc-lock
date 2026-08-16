@@ -2,9 +2,13 @@ import cv2
 import numpy as np
 import time
 import ctypes
+import threading
+
 from collections import deque
 from pathlib import Path
 from insightface.app import FaceAnalysis
+
+from tray import TrayApp
 
 
 # ============================================================
@@ -14,9 +18,9 @@ from insightface.app import FaceAnalysis
 EMBEDDING_FILE = Path('data/yash_embeddings.npy')
 
 MATCH_THRESHOLD = 0.38
-VERIFY_INTERVAL = 0.8
+VERIFY_INTERVAL = 0.7
 DETECTION_INTERVAL = 3.0
-LOCK_TIMEOUT = 7.0
+LOCK_TIMEOUT = 8.0
 ENABLE_LOCK = True
 
 # Temporal voting
@@ -35,7 +39,9 @@ last_verify = 0.0
 last_verified = time.monotonic()
 
 paused = False
+pause_until = None
 locked_once = False
+running = True
 
 # Tracking
 tracker = None
@@ -44,6 +50,9 @@ track_box = None
 
 # Cached recognition
 last_embedding = None
+
+# Used to safely coordinate tray callbacks
+state_lock = threading.Lock()
 
 
 # ============================================================
@@ -76,6 +85,8 @@ else:
 # ============================================================
 # INITIALIZE ARCFACE
 # ============================================================
+
+print('Initializing ArcFace...')
 
 app = FaceAnalysis(
     name='buffalo_l',
@@ -113,7 +124,7 @@ cap.set(
 
 if not cap.isOpened():
 
-    print('Could not open webcam')
+    print('ERROR: Could not open webcam')
     raise SystemExit(1)
 
 
@@ -122,248 +133,463 @@ print('ArcLock running in headless mode')
 
 
 # ============================================================
-# MAIN LOOP
+# RESET TRACKING
 # ============================================================
 
-while True:
+def reset_tracking():
 
-    # --------------------------------------------------------
-    # READ FRAME
-    # --------------------------------------------------------
+    global tracker
+    global tracking
+    global track_box
+    global last_embedding
 
-    ret, frame = cap.read()
-
-    if not ret:
-
-        time.sleep(0.1)
-        continue
-
-
-    now = time.monotonic()
+    tracker = None
+    tracking = False
+    track_box = None
+    last_embedding = None
 
 
-    # --------------------------------------------------------
-    # FULL RETINAFACE DETECTION
-    # --------------------------------------------------------
+# ============================================================
+# PAUSE / RESUME
+# ============================================================
 
-    if (
-        not tracking
-        or
-        now - last_detection >= DETECTION_INTERVAL
-    ):
+def pause_monitoring():
 
-        last_detection = now
+    global paused
+    global pause_until
 
-        faces = app.get(frame)
+    with state_lock:
+
+        paused = True
+        pause_until = None
+
+        history.clear()
+
+        reset_tracking()
+
+    print('Monitoring paused')
 
 
-        if len(faces) == 1:
+def resume_monitoring():
 
-            face = faces[0]
+    global paused
+    global pause_until
+    global locked_once
+    global last_verified
+    global last_detection
+    global last_verify
 
-            x1, y1, x2, y2 = face.bbox.astype(int)
+    with state_lock:
 
-            track_box = (
-                x1,
-                y1,
-                x2 - x1,
-                y2 - y1
+        paused = False
+        pause_until = None
+
+        history.clear()
+
+        reset_tracking()
+
+        locked_once = False
+
+        now = time.monotonic()
+
+        last_verified = now
+        last_detection = 0.0
+        last_verify = 0.0
+
+    print('Monitoring resumed')
+
+
+def pause_for(seconds):
+
+    global paused
+    global pause_until
+
+    with state_lock:
+
+        paused = True
+
+        history.clear()
+
+        reset_tracking()
+
+        if seconds is None:
+
+            pause_until = None
+
+            print(
+                'Monitoring paused until restart'
+            )
+
+        else:
+
+            pause_until = (
+                time.monotonic() + seconds
+            )
+
+            print(
+                f'Monitoring paused for '
+                f'{seconds // 3600} hour(s)'
             )
 
 
-            # Cache embedding from this detection
+def quit_app():
 
-            last_embedding = (
-                face.embedding.astype(np.float32)
-            )
+    global running
+
+    with state_lock:
+
+        running = False
+
+    print('ArcLock stopping...')
 
 
-            # Start tracker
+# ============================================================
+# SYSTEM TRAY
+# ============================================================
 
-            if hasattr(
-                cv2,
-                'TrackerKCF_create'
-            ):
+tray = TrayApp(
+    pause_callback=pause_monitoring,
+    resume_callback=resume_monitoring,
+    pause_for_callback=pause_for,
+    quit_callback=quit_app,
+)
 
-                tracker = cv2.TrackerKCF_create()
+tray_thread = threading.Thread(
+    target=tray.run,
+    daemon=True
+)
+
+tray_thread.start()
+
+
+# ============================================================
+# MAIN ENGINE
+# ============================================================
+
+try:
+
+    while running:
+
+        # ----------------------------------------------------
+        # CHECK PAUSE TIMER
+        # ----------------------------------------------------
+
+        with state_lock:
+
+            currently_paused = paused
+            current_pause_until = pause_until
+
+        if (
+            currently_paused
+            and current_pause_until is not None
+            and time.monotonic() >= current_pause_until
+        ):
+
+            resume_monitoring()
+
+            continue
+
+
+        # ----------------------------------------------------
+        # PAUSED
+        # ----------------------------------------------------
+
+        if currently_paused:
+
+            time.sleep(0.1)
+            continue
+
+
+        # ----------------------------------------------------
+        # READ FRAME
+        # ----------------------------------------------------
+
+        ret, frame = cap.read()
+
+        if not ret:
+
+            reset_tracking()
+
+            time.sleep(0.1)
+            continue
+
+
+        now = time.monotonic()
+
+
+        # ----------------------------------------------------
+        # FULL RETINAFACE DETECTION
+        # ----------------------------------------------------
+
+        if (
+            not tracking
+            or
+            now - last_detection >= DETECTION_INTERVAL
+        ):
+
+            last_detection = now
+
+            try:
+
+                faces = app.get(frame)
+
+            except Exception as e:
+
+                print(
+                    f'Detection error: {e}'
+                )
+
+                reset_tracking()
+
+                time.sleep(0.1)
+                continue
+
+
+            # ------------------------------------------------
+            # EXACTLY ONE FACE
+            # ------------------------------------------------
+
+            if len(faces) == 1:
+
+                face = faces[0]
+
+                x1, y1, x2, y2 = (
+                    face.bbox.astype(int)
+                )
+
+                track_box = (
+                    x1,
+                    y1,
+                    x2 - x1,
+                    y2 - y1
+                )
+
+
+                # --------------------------------------------
+                # CACHE EMBEDDING
+                # --------------------------------------------
+
+                last_embedding = (
+                    face.embedding.astype(
+                        np.float32
+                    )
+                )
+
+
+                # --------------------------------------------
+                # START KCF TRACKER
+                # --------------------------------------------
+
+                try:
+
+                    if hasattr(
+                        cv2,
+                        'TrackerKCF_create'
+                    ):
+
+                        tracker = (
+                            cv2.TrackerKCF_create()
+                        )
+
+                    else:
+
+                        tracker = (
+                            cv2.legacy
+                            .TrackerKCF_create()
+                        )
+
+
+                    tracker.init(
+                        frame,
+                        track_box
+                    )
+
+                    tracking = True
+
+                except Exception as e:
+
+                    print(
+                        f'Tracker initialization '
+                        f'failed: {e}'
+                    )
+
+                    reset_tracking()
+
+
+            # ------------------------------------------------
+            # ZERO OR MULTIPLE FACES
+            # ------------------------------------------------
 
             else:
 
-                tracker = cv2.legacy.TrackerKCF_create()
-
-
-            tracker.init(
-                frame,
-                track_box
-            )
-
-            tracking = True
-
-
-        else:
-
-            tracking = False
-            track_box = None
-            last_embedding = None
-
-
-    # --------------------------------------------------------
-    # TRACK BETWEEN DETECTIONS
-    # --------------------------------------------------------
-
-    elif tracking:
-
-        ok, box = tracker.update(frame)
-
-
-        if ok:
-
-            x, y, w, h = map(
-                int,
-                box
-            )
-
-            track_box = (
-                x,
-                y,
-                w,
-                h
-            )
-
-
-        else:
-
-            tracking = False
-            track_box = None
-            last_embedding = None
-
-
-    # --------------------------------------------------------
-    # VERIFY USING CACHED EMBEDDING
-    # --------------------------------------------------------
-
-    if (
-        not paused
-        and tracking
-        and last_embedding is not None
-        and SAVED_EMBEDDINGS is not None
-        and now - last_verify >= VERIFY_INTERVAL
-    ):
-
-        last_verify = now
-
-        current = last_embedding
-
-        current_norm = np.linalg.norm(
-            current
-        )
-
-
-        dots = (
-            SAVED_EMBEDDINGS @ current
-        )
-
-
-        dists = (
-            1
-            -
-            dots / (
-                SAVED_NORMS
-                *
-                current_norm
-            )
-        )
-
-
-        best = float(
-            np.min(dists)
-        )
-
-
-        is_match = (
-            best < MATCH_THRESHOLD
-        )
-
-
-        history.append(
-            is_match
-        )
-
-
-        verified_count = sum(
-            history
-        )
+                reset_tracking()
 
 
         # ----------------------------------------------------
-        # VERIFIED
+        # TRACK BETWEEN DETECTIONS
         # ----------------------------------------------------
 
-        if verified_count >= REQUIRED_MATCHES:
+        elif tracking:
 
-            last_verified = now
+            try:
 
-            locked_once = False
+                ok, box = tracker.update(
+                    frame
+                )
 
-            print(
-                f'VERIFIED {best:.3f}'
-            )
+
+                if ok:
+
+                    x, y, w, h = map(
+                        int,
+                        box
+                    )
+
+                    track_box = (
+                        x,
+                        y,
+                        w,
+                        h
+                    )
+
+                else:
+
+                    reset_tracking()
+
+
+            except Exception as e:
+
+                print(
+                    f'Tracker error: {e}'
+                )
+
+                reset_tracking()
 
 
         # ----------------------------------------------------
-        # UNCERTAIN
+        # VERIFY USING CACHED EMBEDDING
         # ----------------------------------------------------
-
-        elif verified_count >= 1:
-
-            print(
-                f'UNCERTAIN {best:.3f}'
-            )
-
-
-        # ----------------------------------------------------
-        # NOT VERIFIED
-        # ----------------------------------------------------
-
-        else:
-
-            print(
-                f'NOT VERIFIED {best:.3f}'
-            )
-
-
-    # --------------------------------------------------------
-    # NO FACE
-    # --------------------------------------------------------
-
-    if not tracking:
-
-        history.append(False)
-
-        print('NO FACE')
-
-
-    # --------------------------------------------------------
-    # LOCK TIMER
-    # --------------------------------------------------------
-
-    elapsed = (
-        now - last_verified
-    )
-
-
-    if paused:
-
-        # Keep the monitoring state alive,
-        # but do not lock while paused.
-
-        pass
-
-
-    elif elapsed >= LOCK_TIMEOUT:
 
         if (
-            ENABLE_LOCK
+            not paused
+            and tracking
+            and last_embedding is not None
+            and SAVED_EMBEDDINGS is not None
+            and now - last_verify >= VERIFY_INTERVAL
+        ):
+
+            last_verify = now
+
+            current = last_embedding
+
+            current_norm = np.linalg.norm(
+                current
+            )
+
+
+            if current_norm > 0:
+
+                dots = (
+                    SAVED_EMBEDDINGS
+                    @ current
+                )
+
+
+                dists = (
+                    1
+                    -
+                    dots
+                    /
+                    (
+                        SAVED_NORMS
+                        *
+                        current_norm
+                    )
+                )
+
+
+                best = float(
+                    np.min(dists)
+                )
+
+
+                is_match = (
+                    best < MATCH_THRESHOLD
+                )
+
+
+                history.append(
+                    is_match
+                )
+
+
+                verified_count = sum(
+                    history
+                )
+
+
+                # --------------------------------------------
+                # VERIFIED
+                # --------------------------------------------
+
+                if (
+                    verified_count
+                    >= REQUIRED_MATCHES
+                ):
+
+                    last_verified = now
+
+                    locked_once = False
+
+                    print(
+                        f'VERIFIED {best:.3f}'
+                    )
+
+
+                # --------------------------------------------
+                # UNCERTAIN
+                # --------------------------------------------
+
+                elif verified_count >= 1:
+
+                    print(
+                        f'UNCERTAIN {best:.3f}'
+                    )
+
+
+                # --------------------------------------------
+                # NOT VERIFIED
+                # --------------------------------------------
+
+                else:
+
+                    print(
+                        f'NOT VERIFIED {best:.3f}'
+                    )
+
+
+        # ----------------------------------------------------
+        # NO FACE
+        # ----------------------------------------------------
+
+        if not tracking:
+
+            history.append(False)
+
+
+        # ----------------------------------------------------
+        # LOCK TIMER
+        # ----------------------------------------------------
+
+        elapsed = (
+            now - last_verified
+        )
+
+
+        if (
+            not paused
+            and elapsed >= LOCK_TIMEOUT
+            and ENABLE_LOCK
             and not locked_once
         ):
 
@@ -382,33 +608,52 @@ while True:
                 )
 
 
-            # Reset state after Windows
-            # returns control to the user.
+            # ------------------------------------------------
+            # RESET AFTER LOCK
+            #
+            # Windows LockWorkStation() returns control to
+            # this process after the user unlocks Windows.
+            # ------------------------------------------------
 
             history.clear()
 
-            tracking = False
-            track_box = None
-            last_embedding = None
+            reset_tracking()
 
             last_verified = (
                 time.monotonic()
             )
+
+            last_detection = 0.0
+            last_verify = 0.0
 
             print(
                 'Waiting for user after unlock'
             )
 
 
-    # --------------------------------------------------------
-    # SMALL SLEEP
-    # --------------------------------------------------------
+        # ----------------------------------------------------
+        # SMALL SLEEP
+        # ----------------------------------------------------
 
-    time.sleep(0.01)
+        time.sleep(0.01)
 
 
-# ============================================================
-# CLEANUP
-# ============================================================
+finally:
 
-cap.release()
+    # ========================================================
+    # CLEANUP
+    # ========================================================
+
+    running = False
+
+    try:
+        cap.release()
+    except Exception:
+        pass
+
+    try:
+        tray.icon.stop()
+    except Exception:
+        pass
+
+    print('ArcLock stopped')
