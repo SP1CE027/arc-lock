@@ -161,7 +161,7 @@ def reset_tracking():
 # PAUSE / RESUME
 # ============================================================
 
-def pause_monitoring():
+def pause_monitoring(update_tray=True):
 
     global paused
     global pause_until
@@ -177,8 +177,11 @@ def pause_monitoring():
 
     log('Monitoring paused')
 
+    if update_tray:
+        tray.set_disabled()
 
-def resume_monitoring():
+
+def resume_monitoring(update_tray=True):
 
     global paused
     global pause_until
@@ -205,6 +208,9 @@ def resume_monitoring():
         last_verify = 0.0
 
     log('Monitoring resumed')
+
+    if update_tray:
+        tray.set_enabled()
 
 
 def pause_for(seconds):

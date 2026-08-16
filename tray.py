@@ -21,10 +21,11 @@ class TrayApp:
         self.quit_callback = quit_callback
 
         self.paused = False
+        self.status = "enabled"
 
         self.icon = pystray.Icon(
             "ArcLock",
-            self.create_icon(),
+            self.create_icon("enabled"),
             "ArcLock",
             menu=pystray.Menu(
 
@@ -77,7 +78,7 @@ class TrayApp:
     # ========================================================
 
     @staticmethod
-    def create_icon():
+    def create_icon(status):
 
         image = Image.new(
             "RGB",
@@ -87,8 +88,32 @@ class TrayApp:
 
         draw = ImageDraw.Draw(image)
 
+        if status == "enabled":
+
+            fill = (0, 200, 0)
+
+        elif status == "paused":
+
+            fill = (255, 200, 0)
+
+        elif status == "error":
+
+            fill = (220, 0, 0)
+
+        else:
+
+            fill = (255, 255, 255)
+
         draw.ellipse(
             (8, 8, 56, 56),
+            fill=fill,
+        )
+
+        # Small white center gives the icon a more
+        # recognizable ArcLock appearance.
+
+        draw.ellipse(
+            (22, 22, 42, 42),
             fill=(255, 255, 255),
         )
 
@@ -99,16 +124,40 @@ class TrayApp:
     # STATUS
     # ========================================================
 
+    def set_status(self, status):
+
+        if status not in (
+            "enabled",
+            "paused",
+            "error",
+        ):
+
+            return
+
+        self.status = status
+
+        self.icon.icon = self.create_icon(
+            status
+        )
+
+        self.icon.update_menu()
+
+
     def status_text(self, item):
 
         if self.paused:
+
             return "Paused"
+
+        if self.status == "error":
+
+            return "Error"
 
         return "Enabled"
 
 
     # ========================================================
-    # TOGGLE PAUSE
+    # PAUSE / RESUME
     # ========================================================
 
     def toggle_pause(
@@ -121,15 +170,25 @@ class TrayApp:
 
             self.paused = False
 
-            self.resume_callback()
+            self.resume_callback(
+                update_tray=False
+            )
+
+            self.set_status(
+                "enabled"
+            )
 
         else:
 
             self.paused = True
 
-            self.pause_callback()
+            self.pause_callback(
+                update_tray=False
+            )
 
-        icon.update_menu()
+            self.set_status(
+                "paused"
+            )
 
 
     # ========================================================
@@ -148,7 +207,9 @@ class TrayApp:
             3600
         )
 
-        icon.update_menu()
+        self.set_status(
+            "paused"
+        )
 
 
     def pause_2h(
@@ -163,7 +224,9 @@ class TrayApp:
             7200
         )
 
-        icon.update_menu()
+        self.set_status(
+            "paused"
+        )
 
 
     def pause_3h(
@@ -178,7 +241,9 @@ class TrayApp:
             10800
         )
 
-        icon.update_menu()
+        self.set_status(
+            "paused"
+        )
 
 
     def pause_until_restart(
@@ -193,7 +258,33 @@ class TrayApp:
             None
         )
 
-        icon.update_menu()
+        self.set_status(
+            "paused"
+        )
+
+
+    # ========================================================
+    # RESUME FROM MAIN
+    # ========================================================
+
+    def set_enabled(self):
+
+        self.paused = False
+
+        self.set_status(
+            "enabled"
+        )
+
+
+    # ========================================================
+    # ERROR
+    # ========================================================
+
+    def set_error(self):
+
+        self.set_status(
+            "error"
+        )
 
 
     # ========================================================
