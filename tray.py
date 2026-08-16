@@ -2,6 +2,8 @@ import pystray
 from pystray import MenuItem as Item
 from PIL import Image, ImageDraw
 
+from logs import show_logs
+
 
 class TrayApp:
 
@@ -12,6 +14,7 @@ class TrayApp:
         pause_for_callback,
         quit_callback,
     ):
+
         self.pause_callback = pause_callback
         self.resume_callback = resume_callback
         self.pause_for_callback = pause_for_callback
@@ -24,9 +27,17 @@ class TrayApp:
             self.create_icon(),
             "ArcLock",
             menu=pystray.Menu(
+
                 Item(
                     self.status_text,
                     self.toggle_pause,
+                ),
+
+                pystray.Menu.SEPARATOR,
+
+                Item(
+                    "View Logs",
+                    show_logs,
                 ),
 
                 pystray.Menu.SEPARATOR,
@@ -60,9 +71,10 @@ class TrayApp:
             ),
         )
 
-    # ---------------------------------------------------------
+
+    # ========================================================
     # ICON
-    # ---------------------------------------------------------
+    # ========================================================
 
     @staticmethod
     def create_icon():
@@ -82,9 +94,10 @@ class TrayApp:
 
         return image
 
-    # ---------------------------------------------------------
+
+    # ========================================================
     # STATUS
-    # ---------------------------------------------------------
+    # ========================================================
 
     def status_text(self, item):
 
@@ -93,69 +106,114 @@ class TrayApp:
 
         return "Enabled"
 
-    # ---------------------------------------------------------
-    # PAUSE / RESUME
-    # ---------------------------------------------------------
 
-    def toggle_pause(self, icon, item):
+    # ========================================================
+    # TOGGLE PAUSE
+    # ========================================================
+
+    def toggle_pause(
+        self,
+        icon,
+        item,
+    ):
 
         if self.paused:
 
             self.paused = False
+
             self.resume_callback()
 
         else:
 
             self.paused = True
+
             self.pause_callback()
 
         icon.update_menu()
 
-    # ---------------------------------------------------------
+
+    # ========================================================
     # TIMED PAUSES
-    # ---------------------------------------------------------
+    # ========================================================
 
-    def pause_1h(self, icon, item):
+    def pause_1h(
+        self,
+        icon,
+        item,
+    ):
 
         self.paused = True
-        self.pause_for_callback(3600)
+
+        self.pause_for_callback(
+            3600
+        )
 
         icon.update_menu()
 
-    def pause_2h(self, icon, item):
+
+    def pause_2h(
+        self,
+        icon,
+        item,
+    ):
 
         self.paused = True
-        self.pause_for_callback(7200)
+
+        self.pause_for_callback(
+            7200
+        )
 
         icon.update_menu()
 
-    def pause_3h(self, icon, item):
+
+    def pause_3h(
+        self,
+        icon,
+        item,
+    ):
 
         self.paused = True
-        self.pause_for_callback(10800)
+
+        self.pause_for_callback(
+            10800
+        )
 
         icon.update_menu()
 
-    def pause_until_restart(self, icon, item):
+
+    def pause_until_restart(
+        self,
+        icon,
+        item,
+    ):
 
         self.paused = True
-        self.pause_for_callback(None)
+
+        self.pause_for_callback(
+            None
+        )
 
         icon.update_menu()
 
-    # ---------------------------------------------------------
+
+    # ========================================================
     # QUIT
-    # ---------------------------------------------------------
+    # ========================================================
 
-    def quit_app(self, icon, item):
+    def quit_app(
+        self,
+        icon,
+        item,
+    ):
 
         self.quit_callback()
 
         icon.stop()
 
-    # ---------------------------------------------------------
+
+    # ========================================================
     # RUN
-    # ---------------------------------------------------------
+    # ========================================================
 
     def run(self):
 

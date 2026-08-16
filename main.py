@@ -9,6 +9,7 @@ from pathlib import Path
 from insightface.app import FaceAnalysis
 
 from tray import TrayApp
+from logs import start_log_window, log, stop_log_window
 
 
 # ============================================================
@@ -56,6 +57,13 @@ state_lock = threading.Lock()
 
 
 # ============================================================
+# LOGGING
+# ============================================================
+
+start_log_window()
+
+
+# ============================================================
 # LOAD EMBEDDINGS
 # ============================================================
 
@@ -70,7 +78,7 @@ if EMBEDDING_FILE.exists():
         axis=1
     )
 
-    print(
+    log(
         f'Loaded {len(SAVED_EMBEDDINGS)} embeddings'
     )
 
@@ -79,14 +87,14 @@ else:
     SAVED_EMBEDDINGS = None
     SAVED_NORMS = None
 
-    print('WARNING: No face embeddings found')
+    log('WARNING: No face embeddings found')
 
 
 # ============================================================
 # INITIALIZE ARCFACE
 # ============================================================
 
-print('Initializing ArcFace...')
+log('Initializing ArcFace...')
 
 app = FaceAnalysis(
     name='buffalo_l',
@@ -98,7 +106,7 @@ app.prepare(
     det_size=(320, 320)
 )
 
-print('ArcFace initialized')
+log('ArcFace initialized')
 
 
 # ============================================================
@@ -124,12 +132,12 @@ cap.set(
 
 if not cap.isOpened():
 
-    print('ERROR: Could not open webcam')
+    log('ERROR: Could not open webcam')
     raise SystemExit(1)
 
 
-print('Webcam opened')
-print('ArcLock running in headless mode')
+log('Webcam opened')
+log('ArcLock running in headless mode')
 
 
 # ============================================================
@@ -167,7 +175,7 @@ def pause_monitoring():
 
         reset_tracking()
 
-    print('Monitoring paused')
+    log('Monitoring paused')
 
 
 def resume_monitoring():
@@ -196,7 +204,7 @@ def resume_monitoring():
         last_detection = 0.0
         last_verify = 0.0
 
-    print('Monitoring resumed')
+    log('Monitoring resumed')
 
 
 def pause_for(seconds):
@@ -216,7 +224,7 @@ def pause_for(seconds):
 
             pause_until = None
 
-            print(
+            log(
                 'Monitoring paused until restart'
             )
 
@@ -226,7 +234,7 @@ def pause_for(seconds):
                 time.monotonic() + seconds
             )
 
-            print(
+            log(
                 f'Monitoring paused for '
                 f'{seconds // 3600} hour(s)'
             )
@@ -240,7 +248,7 @@ def quit_app():
 
         running = False
 
-    print('ArcLock stopping...')
+    log('ArcLock stopping...')
 
 
 # ============================================================
@@ -310,6 +318,8 @@ try:
 
             reset_tracking()
 
+            log('WARNING: Webcam frame capture failed')
+
             time.sleep(0.1)
             continue
 
@@ -335,7 +345,7 @@ try:
 
             except Exception as e:
 
-                print(
+                log(
                     f'Detection error: {e}'
                 )
 
@@ -408,7 +418,7 @@ try:
 
                 except Exception as e:
 
-                    print(
+                    log(
                         f'Tracker initialization '
                         f'failed: {e}'
                     )
@@ -459,7 +469,7 @@ try:
 
             except Exception as e:
 
-                print(
+                log(
                     f'Tracker error: {e}'
                 )
 
@@ -541,7 +551,7 @@ try:
 
                     locked_once = False
 
-                    print(
+                    log(
                         f'VERIFIED {best:.3f}'
                     )
 
@@ -552,7 +562,7 @@ try:
 
                 elif verified_count >= 1:
 
-                    print(
+                    log(
                         f'UNCERTAIN {best:.3f}'
                     )
 
@@ -563,7 +573,7 @@ try:
 
                 else:
 
-                    print(
+                    log(
                         f'NOT VERIFIED {best:.3f}'
                     )
 
@@ -595,7 +605,7 @@ try:
 
             locked_once = True
 
-            print('LOCKING')
+            log('LOCKING')
 
             try:
 
@@ -603,16 +613,13 @@ try:
 
             except Exception as e:
 
-                print(
+                log(
                     f'Lock failed: {e}'
                 )
 
 
             # ------------------------------------------------
             # RESET AFTER LOCK
-            #
-            # Windows LockWorkStation() returns control to
-            # this process after the user unlocks Windows.
             # ------------------------------------------------
 
             history.clear()
@@ -626,7 +633,7 @@ try:
             last_detection = 0.0
             last_verify = 0.0
 
-            print(
+            log(
                 'Waiting for user after unlock'
             )
 
@@ -647,13 +654,325 @@ finally:
     running = False
 
     try:
+
         cap.release()
+
     except Exception:
         pass
+
 
     try:
+
         tray.icon.stop()
+
     except Exception:
         pass
 
-    print('ArcLock stopped')
+
+    log('ArcLock stopped')
+
+    stop_log_window()
+    import tkinter as tk
+from tkinter.scrolledtext import ScrolledText
+
+from datetime import datetime
+
+import queue
+import threading
+
+
+# ============================================================
+# STATE
+# ============================================================
+
+_command_queue = queue.Queue()
+
+_log_history = []
+
+_started = False
+
+_start_lock = threading.Lock()
+
+_tk_thread = None
+
+
+# ============================================================
+# TKINTER THREAD
+# ============================================================
+
+def _tk_worker():
+
+    root = tk.Tk()
+
+    root.title("ArcLock Logs")
+
+    root.geometry(
+        "700x400"
+    )
+
+    root.minsize(
+        500,
+        250
+    )
+
+
+    # --------------------------------------------------------
+    # LOG TEXT AREA
+    # --------------------------------------------------------
+
+    text = ScrolledText(
+        root,
+        state="disabled",
+        font=("Consolas", 10)
+    )
+
+    text.pack(
+        fill="both",
+        expand=True
+    )
+
+
+    # --------------------------------------------------------
+    # CLOSE = HIDE
+    # --------------------------------------------------------
+
+    root.protocol(
+        "WM_DELETE_WINDOW",
+        root.withdraw
+    )
+
+
+    # Start hidden
+    root.withdraw()
+
+
+    # --------------------------------------------------------
+    # INSERT LOG
+    # --------------------------------------------------------
+
+    def insert_log(line):
+
+        text.configure(
+            state="normal"
+        )
+
+        text.insert(
+            "end",
+            line
+        )
+
+        text.see(
+            "end"
+        )
+
+        text.configure(
+            state="disabled"
+        )
+
+
+    # --------------------------------------------------------
+    # LOAD EXISTING LOGS
+    # --------------------------------------------------------
+
+    for line in _log_history:
+
+        insert_log(line)
+
+
+    # --------------------------------------------------------
+    # PROCESS QUEUE
+    # --------------------------------------------------------
+
+    def process_commands():
+
+        try:
+
+            while True:
+
+                command = (
+                    _command_queue.get_nowait()
+                )
+
+
+                # --------------------------------------------
+                # SHOW WINDOW
+                # --------------------------------------------
+
+                if command == "show":
+
+                    root.deiconify()
+
+                    root.lift()
+
+                    root.attributes(
+                        "-topmost",
+                        True
+                    )
+
+                    root.after(
+                        100,
+                        lambda: root.attributes(
+                            "-topmost",
+                            False
+                        )
+                    )
+
+                    root.focus_force()
+
+
+                # --------------------------------------------
+                # HIDE WINDOW
+                # --------------------------------------------
+
+                elif command == "hide":
+
+                    root.withdraw()
+
+
+                # --------------------------------------------
+                # QUIT
+                # --------------------------------------------
+
+                elif command == "quit":
+
+                    root.destroy()
+
+                    return
+
+
+                # --------------------------------------------
+                # LOG MESSAGE
+                # --------------------------------------------
+
+                elif (
+                    isinstance(command, tuple)
+                    and command[0] == "log"
+                ):
+
+                    insert_log(
+                        command[1]
+                    )
+
+
+        except queue.Empty:
+
+            pass
+
+
+        # Check again in 100 ms
+
+        root.after(
+            100,
+            process_commands
+        )
+
+
+    # --------------------------------------------------------
+    # START QUEUE PROCESSING
+    # --------------------------------------------------------
+
+    process_commands()
+
+
+    # --------------------------------------------------------
+    # TKINTER MAIN LOOP
+    # --------------------------------------------------------
+
+    root.mainloop()
+
+
+# ============================================================
+# START LOG WINDOW
+# ============================================================
+
+def start_log_window():
+
+    global _started
+    global _tk_thread
+
+    with _start_lock:
+
+        if _started:
+
+            return
+
+        _started = True
+
+        _tk_thread = threading.Thread(
+            target=_tk_worker,
+            name="ArcLock-LogWindow",
+            daemon=True
+        )
+
+        _tk_thread.start()
+
+
+# ============================================================
+# SHOW LOG WINDOW
+# ============================================================
+
+def show_logs(
+    icon=None,
+    item=None
+):
+
+    if not _started:
+
+        start_log_window()
+
+
+    _command_queue.put(
+        "show"
+    )
+
+
+# ============================================================
+# WRITE LOG
+# ============================================================
+
+def log(message):
+
+    timestamp = datetime.now().strftime(
+        "%H:%M:%S"
+    )
+
+    line = (
+        f"[{timestamp}] "
+        f"{message}\n"
+    )
+
+
+    # Keep an in-memory copy so logs that happen before
+    # the window is opened are still displayed.
+
+    _log_history.append(
+        line
+    )
+
+
+    # Send the message to the Tkinter thread.
+
+    if _started:
+
+        _command_queue.put(
+            (
+                "log",
+                line
+            )
+        )
+
+
+# ============================================================
+# STOP LOG WINDOW
+# ============================================================
+
+def stop_log_window():
+
+    if not _started:
+
+        return
+
+
+    _command_queue.put(
+        "quit"
+    )
