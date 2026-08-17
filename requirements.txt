@@ -1,4 +1,6 @@
-opencv-python
-insightface
-onnxruntime
-numpy
+opencv-contrib-python==4.10.0.84
+insightface==1.0.1
+onnxruntime==1.28.0
+numpy==2.5.2
+pystray==0.19.5
+Pillow==12.3.0
